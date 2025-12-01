@@ -207,42 +207,7 @@ return_pattern:
     addi $sp, $sp, 4
     jr   $ra                  # Return $v0 (match length)
 
-################################################################################
-# HELPER: get_greedy_length (for X*)
-# Finds the length of a maximal match for a character/range followed by *.
-################################################################################
-get_greedy_length:
-    addi $sp, $sp, -4
-    sw   $ra, 0($sp)
 
-    # Initialize pointers and length
-    move $t6, $a0             # t6 = base regex char pointer (X)
-    move $t7, $a1             # t7 = base sentence pointer
-    li   $t3, 0               # t3 = consumed length
-
-greedy_loop_helper:
-    # Check if end of sentence is reached
-    lb   $t2, 0($t7)
-    beq  $t2, $zero, greedy_end # End of sentence, stop
-    
-    # Prepare arguments for single_token_match:
-    move $a0, $t6
-    move $a1, $t7
-    jal  single_token_match    # v0: 1 if match, 0 if fail.
-    
-    bne  $v0, 1, greedy_end    # If token X does not match char, stop loop
-
-    # Match successful, consume character from text
-    addi $t7, $t7, 1           # s_ptr++
-    addi $t3, $t3, 1           # match_length++
-    j    greedy_loop_helper    # Try to consume more chars
-
-greedy_end:
-    move $v0, $t3              # Return length
-    
-    lw   $ra, 0($sp)
-    addi $sp, $sp, 4
-    jr   $ra
 
 ################################################################################
 # HELPER: single_token_match 
