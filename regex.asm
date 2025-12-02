@@ -1,35 +1,35 @@
 # ===================================================================
 # Authors: Crawford Barnett, Tyler Hintz, Matt Weber
-# Description: Simple MIPS Regex Matcher (supports literals, ., *, [], [^], and \ escape)
+# 
+# Description: MIPS assembly program that matches regular expressions
+# Supports: single chars, dot (.), star (*), character ranges [a-z], 
+# negation [^], and escape sequences (\)
+#
 # ===================================================================
 
 .data
-# --- User Prompts and Output Messages ---
-prompt_regex: .asciiz "Enter Regular Expression (e.g., abc, a*, [a-z], [^0-9]*): "
-prompt_sentence: .asciiz "Enter Sentence to evaluate: "
-output_header: .asciiz "Matches: "
+# Prompts for user input
+prompt_regex: .asciiz "Enter regular expression: "
+prompt_text: .asciiz "Enter text to match: "
 newline: .asciiz "\n"
-comma_space: .asciiz ", "
+comma: .asciiz ", "
 
-# --- Buffers for Input Strings ---
+# Input buffers
 regex_buffer: .space 256 
-sentence_buffer: .space 1024
+text_buffer: .space 1024
 
-# --- Register Usage Convention ---
-# $s0: Base address of the Regex string
-# $s1: Base address of the Target Sentence
-# $s2: Current search pointer in the Target Sentence (Outer Loop)
-# $s3: Match length from a successful call to match_pattern
-# $s4: First Match Flag (0: No comma needed, 1: Comma needed)
+# Register usage:
+# $s0 = regex string address
+# $s1 = text string address  
+# $s2 = current position in text
+# $s3 = match length
+# $s4 = first match flag (for comma printing)
 
 .text
 .globl main
 
-################################################################################
-# MAIN EXECUTION
-################################################################################
 main:
-    # 1. Read Regular Expression
+    # Get regular expression from user
     li $v0, 4                 
     la $a0, prompt_regex      
     syscall
@@ -38,387 +38,468 @@ main:
     la $a0, regex_buffer      
     li $a1, 256               
     syscall                   
-    move $s0, $a0             # $s0 = Address of the Regex Buffer
+    move $s0, $a0             # save regex address
     jal clean_newline         
 
-    # 2. Read Sentence
+    # Get text to search from user  
     li $v0, 4                 
-    la $a0, prompt_sentence   
+    la $a0, prompt_text   
     syscall
 
     li $v0, 8                 
-    la $a0, sentence_buffer   
+    la $a0, text_buffer   
     li $a1, 1024              
     syscall                   
-    move $s1, $a0             # $s1 = Address of the Sentence Buffer
+    move $s1, $a0             # save text address
     jal clean_newline         
     
-    # 3. Initialization
-    move $s2, $s1             # $s2 = Start searching from the beginning of the sentence
-    li   $s4, 0               # $s4 = First match flag (0: No comma needed)
+    # Setup for searching
+    move $s2, $s1             # start at beginning of text
+    li $s4, 0                 # no matches found yet
 
-    # Print output header
-    li $v0, 4                 
-    la $a0, output_header
-    syscall
-
-################################################################################
-# OUTER_LOOP: Iterates through the sentence, attempting a match at every position.
-################################################################################
+# Main loop - try to find matches starting at each position in the text
 outer_loop:
-    # Check if end of sentence is reached (null terminator)
-    lb  $t0, 0($s2)            
-    beq $t0, $zero, end_search 
+    # Check if we've reached the end of the text
+    lb $t0, 0($s2)            
+    beq $t0, $zero, end_search
 
-    move $a0, $s0             # Regex start address
-    move $a1, $s2             # Current sentence start
+    # Try to match the regex pattern starting at current position
+    move $a0, $s0             # regex pattern
+    move $a1, $s2             # current text position
     
-    jal  match_pattern         
-    move $s3, $v0             # $s3 = Match length (0 means no match)
+    jal match_pattern         
+    move $s3, $v0             # save match length (0 means no match)
 
-    # Check for successful match
-    bgt  $s3, $zero, match_found
+    # If we found a match, go print it
+    bgt $s3, $zero, match_found
 
-no_match_at_current_pos:
+    # No match at this position, try next character
     addi $s2, $s2, 1
-    j    outer_loop
+    j outer_loop
 
 match_found:
-    # A match of length $s3 was found starting at $s2.
-    
-    # 1. Print comma separator if not the first match
+    # Print comma if this isn't the first match
     beq $s4, $zero, skip_comma 
-    li  $v0, 4
-    la  $a0, comma_space
+    li $v0, 4
+    la $a0, comma
     syscall
 skip_comma:
-    li  $s4, 1                 # Set $s4 flag to 1 (next match needs a comma)
+    li $s4, 1                 # remember we've printed at least one match
 
-    # 2. Print the matched substring
-    move $a0, $s2             # $a0 = Start address of the match
-    move $a1, $s3             # $a1 = Length of the match
-    jal  print_substring       
+    # Print the matched text
+    move $a0, $s2             # start of match
+    move $a1, $s3             # length of match
+    jal print_substring       
 
-    # 3. Advance the sentence pointer by the match length (maximal munch).
-    add  $s2, $s2, $s3         # $s2 += match_length
-    
-    j    outer_loop              
+    # Move past the match and keep looking
+    add $s2, $s2, $s3         
+    j outer_loop              
 
 end_search:
-    # Print a final newline and exit.
-    li  $v0, 4
-    la  $a0, newline
+    # Print newline and exit
+    li $v0, 4
+    la $a0, newline
     syscall
 
-    li  $v0, 10                
+    li $v0, 10                
     syscall
     
-################################################################################
-# CORE REGEX MATCHING LOGIC (match_pattern)
-################################################################################
-
-# match_pattern: Iteratively matches the entire regex against the sentence.
-# Arguments: 
-#   $a0 (Pattern/Regex): Start address of the regex string
-#   $a1 (Text/Sentence): Start address of the sentence substring
-# Returns: 
-#   $v0: Length of the matched substring (0 if no match).
+# match_pattern: tries to match the whole regex pattern starting at a position
+# inputs: $a0 = regex pattern, $a1 = text position
+# returns: $v0 = length of match (0 if no match)
 match_pattern:
-    addi $sp, $sp, -4         # Save $ra
-    sw   $ra, 0($sp)
+    addi $sp, $sp, -4         
+    sw $ra, 0($sp)
 
-    # $s5: Regex pointer (r_ptr)
-    # $s6: Sentence pointer (s_ptr)
-    # $t3: Match length of the current token (1 or more)
-    # $t4: Total match length so far
-
-    move $s5, $a0             # $s5 = r_ptr (start of regex pattern)
-    move $s6, $a1             # $s6 = s_ptr (start of sentence substring)
-    li   $t4, 0               # $t4 = Total Match Length
+    # use these registers to keep track of where we are
+    move $s5, $a0             # regex pointer
+    move $s6, $a1             # text pointer
+    li $t4, 0                 # total match length so far
 
 full_match_loop:
-    # 1. Check if full regex pattern is consumed
-    lb  $t0, 0($s5)
-    beq $t0, $zero, fml_success # Regex consumed, success!
+    # check if we've matched the whole regex pattern
+    lb $t0, 0($s5)
+    beq $t0, $zero, success_match # if end of pattern, we succeeded!
 
+    # need to look ahead for star, but position depends on pattern type
+    lb $t5, 0($s5)
     
-    # Prepare arguments for single_token_match helper
-    move $a0, $s5             # $a0 = r_ptr (token address)
-    move $a1, $s6             # $a1 = s_ptr (sentence char address)
-    jal  single_token_match   # $v0: 1 if match, 0 if fail.
-    move $t3, $v0             # $t3 = match length (1 or 0)
+    # Check if this is a character class [...]
+    li $t9, '['
+    bne $t5, $t9, check_escape_star
     
-    # If match failed
-    beq  $t3, $zero, fml_fail 
+    # It's a character class - find the closing bracket first
+    move $t3, $s5
+    addi $t3, $t3, 1          # skip [
+find_bracket:
+    lb $t6, 0($t3)
+    li $t9, ']'
+    beq $t6, $t9, found_bracket
+    beq $t6, $zero, no_star  # safety check
+    addi $t3, $t3, 1
+    j find_bracket
+found_bracket:
+    # Now check if there's a star after the ]
+    lb $t1, 1($t3)           # character after ]
+    li $t2, '*'
+    beq $t1, $t2, handle_star
+    j no_star
+
+check_escape_star:
+    # Check if this is an escape sequence
+    li $t9, 92              # backslash
+    bne $t5, $t9, check_normal_star
     
-    # If match succeeded: advance regex pointer by full token, text by 1
-    lb   $t5, 0($s5)          # t5 = current regex char
+    # It's an escape - star would be at position 2
+    lb $t1, 2($s5)
+    li $t2, '*'
+    beq $t1, $t2, handle_star
+    j no_star
 
-    # If token is a range [...]
-    li   $t9, '['
-    beq  $t5, $t9, fml_advance_past_range
+check_normal_star:
+    # Normal character - star at position 1
+    lb $t1, 1($s5)           
+    li $t2, '*'
+    beq $t1, $t2, handle_star
 
-    # If token is an escape \x
-    li   $t9, '\\'
-    beq  $t5, $t9, fml_advance_past_escape
+no_star:
+    # no star, so just try to match this one character
+    move $a0, $s5             
+    move $a1, $s6             
+    jal single_token_match    # returns 1 if match, 0 if no match
+    move $t3, $v0             
+    
+    # if this character didn't match, the whole pattern fails
+    beq $t3, $zero, fail_match 
+    
+    # character matched! now we need to advance both pointers
+    lb $t5, 0($s5)          
 
-    # Default: single-char token (literal or '.')
+    # check what type of character we just matched
+    li $t9, '['
+    beq $t5, $t9, advance_past_range
+
+    li $t9, 92              # backslash
+    beq $t5, $t9, advance_past_escape
+
+    # regular character, just move forward one
     addi $s5, $s5, 1
-    j    fml_advance_sentence
+    j advance_text
 
-fml_advance_past_escape:
-    # Skip '\' and the escaped character
+handle_star:
+    # found a star! try to match as many as possible
+    move $a0, $s5             
+    move $a1, $s6               
+    jal match_star_pattern    # this handles the X* matching
+    
+    add $t4, $t4, $v0        # add to total match length
+    add $s6, $s6, $v0        # move text pointer forward
+    
+    # now skip past the character and star in the pattern
+    lb $t5, 0($s5)          
+    li $t9, '['
+    beq $t5, $t9, advance_past_range_star
+
+    li $t9, 92              # backslash
+    beq $t5, $t9, advance_past_escape_star
+
+    # regular character + star
+    addi $s5, $s5, 2          # skip both the char and *
+    j full_match_loop
+
+advance_past_escape_star:
+    addi $s5, $s5, 3          # skip \, char, and *
+    j full_match_loop
+
+advance_past_range_star:
+    # skip past [...]*
+    addi $s5, $s5, 1          # skip [
+range_star_loop:
+    lb $t6, 0($s5)
+    li $t9, ']'
+    beq $t6, $t9, done_range_star
+    beq $t6, $zero, done_range_star  # just in case
+    addi $s5, $s5, 1
+    j range_star_loop
+done_range_star:
+    addi $s5, $s5, 2          # skip ] and *
+    j full_match_loop
+
+advance_past_escape:
+    # skip backslash and the escaped character
     addi $s5, $s5, 2
-    j    fml_advance_sentence
+    j advance_text
 
-fml_advance_past_range:
-    # Move from '[' to first content char
+advance_past_range:
+    # skip past [...]
     addi $s5, $s5, 1
-fml_advance_range_loop:
-    lb   $t6, 0($s5)
-    li   $t9, ']'
-    beq  $t6, $t9, fml_done_advance_range
-    beq  $t6, $zero, fml_done_advance_range  # safety: malformed regex
+range_loop:
+    lb $t6, 0($s5)
+    li $t9, ']'
+    beq $t6, $t9, done_range
+    beq $t6, $zero, done_range  
     addi $s5, $s5, 1
-    j    fml_advance_range_loop
-
-fml_done_advance_range:
-    # Step over closing ']'
+    j range_loop
+done_range:
     addi $s5, $s5, 1
 
-fml_advance_sentence:
-    addi $s6, $s6, 1          # Consumed exactly one text char
-    addi $t4, $t4, 1          # Add 1 to total length
-    j    full_match_loop      # Continue loop
+advance_text:
+    addi $s6, $s6, 1          # move to next text character
+    addi $t4, $t4, 1          # add to match length
+    j full_match_loop      
 
+success_match:
+    move $v0, $t4             # return total match length
+    j return_pattern
 
-
-# --- Success/Fail ---
-fml_success:
-    move $v0, $t4             # Return total match length
-    j    return_pattern
-
-fml_fail:
-    li   $v0, 0               # Return 0 length (fail)
-    j    return_pattern
+fail_match:
+    li $v0, 0                 # return 0 (no match)
+    j return_pattern
 
 return_pattern:
-    lw   $ra, 0($sp)
+    lw $ra, 0($sp)
     addi $sp, $sp, 4
-    jr   $ra                  # Return $v0 (match length)
+    jr $ra                  
 
+# match_star_pattern: handles the * part of regex (match zero or more)
+# $a0 = what character to match multiple times
+# $a1 = where we are in the text
+# returns $v0 = how many characters we matched
+match_star_pattern:
+    addi $sp, $sp, -16
+    sw $ra, 12($sp)
+    sw $s0, 8($sp)          # count of how many we matched
+    sw $s1, 4($sp)          # current text position
+    sw $s2, 0($sp)          # the pattern we're matching
+    
+    li $s0, 0               # start with 0 matches
+    move $s1, $a1             
+    move $s2, $a0             
 
+star_loop:
+    # try to match the character at current position
+    move $a0, $s2             # pattern token
+    move $a1, $s1             # current text address
+    jal single_token_match
+    
+    # if it doesn't match, we're done (star can match zero times)
+    beq $v0, $zero, star_done
+    
+    # it matched! move forward and try again
+    addi $s1, $s1, 1          # move to next character in text
+    addi $s0, $s0, 1          # increment match count
+    j star_loop
 
-################################################################################
-# HELPER: single_token_match 
-# Matches a non-quantified regex token (Char, ., or []) against ONE sentence char.
-################################################################################
+star_done:
+    move $v0, $s0             # return how many we matched
+    
+    lw $ra, 12($sp)
+    lw $s0, 8($sp)
+    lw $s1, 4($sp)
+    lw $s2, 0($sp)
+    addi $sp, $sp, 16
+    jr $ra
+
+# single_token_match: checks if one character matches the pattern
+# $a0 = pattern character, $a1 = text character
+# returns 1 if match, 0 if no match
 single_token_match:
     addi $sp, $sp, -4
-    sw   $ra, 0($sp)
+    sw $ra, 0($sp)
 
-    # $t0: Current char from regex
-    # $t2: Current char from sentence
+    lb $t0, 0($a0)           # get pattern character
+    lb $t2, 0($a1)           # get text character
     
-    lb   $t0, 0($a0)           # $t0 = current regex char
-    lb   $t2, 0($a1)           # $t2 = current sentence char
+    # if we hit end of text, no match
+    beq $t2, $zero, no_match 
+
+    # check for special characters
+    li $t9, 92              # backslash (escape)
+    beq $t0, $t9, handle_escape 
     
-    # 1. Check for end of sentence 
-    beq  $t2, $zero, stm_fail_return 
+    li $t9, '.'             # dot (matches anything)
+    beq $t0, $t9, yes_match 
 
-    # 2. Check for Escape '\'
-    li   $t9, '\\'
-    beq  $t0, $t9, handle_escape_char_stm 
+    li $t9, '['             # start of character range
+    beq $t0, $t9, handle_range
+
+    # regular character - just compare them
+    beq $t0, $t2, yes_match 
     
-    # 3. Check for Wildcard '.'
-    li   $t9, '.'
-    beq  $t0, $t9, stm_success_return # '.' matches any non-null char
+    j no_match
 
-    # 4. Check for Range '['
-    li   $t9, '['
-    beq  $t0, $t9, handle_range_stm
-
-    # 5. Default: Literal Character Match
-    beq  $t0, $t2, stm_success_return # Literal match
+handle_escape:
+    # get the character after the backslash
+    lb $t0, 1($a0)            
+    bne $t0, $zero, check_escaped 
+    j no_match         
     
-    j    stm_fail_return         # Literal mismatch
+check_escaped:
+    beq $t0, $t2, yes_match # match the literal character
+    j no_match
 
-# --- Helper for Escape Character (\.) ---
-handle_escape_char_stm:
-    lb   $t0, 1($a0)            # $t0 = escaped character (e.g., '.')
-    bne  $t0, $zero, escape_check_char 
-    j    stm_fail_return         
-    
-escape_check_char:
-    beq  $t0, $t2, stm_success_return # Match the literal escaped char
-    j    stm_fail_return
-
-# --- Helper for Character Range ([...]) ---
-handle_range_stm:
-    # Save necessary registers: $a0 (regex start), $t2 (sentence char), $s5 (range ptr)
+handle_range:
+    # save registers we'll need
     addi $sp, $sp, -16
-    sw   $ra, 12($sp)
-    sw   $a0, 8($sp)            # Save original $a0 (regex pointer from caller)
-    sw   $t2, 4($sp)            # Save $t2 (sentence character)
-    sw   $s5, 0($sp)            # Save $s5 (will be used for range pointer)
+    sw $ra, 12($sp)
+    sw $a0, 8($sp)            
+    sw $t2, 4($sp)            
+    sw $s5, 0($sp)            
 
-    move $s7, $t2               # $s7 = Sentence Character (the one we are matching)
-    move $s5, $a0               # $s5 = Current position in the RANGE content (our new pointer)
-    addi $s5, $s5, 1            # $s5 points past '['
+    move $s7, $t2               # character we're trying to match
+    move $t3, $a0               # range pattern pointer (use $t3 instead of $s5)
+    addi $t3, $t3, 1            # skip past '['
 
-    li   $t8, 0                 # $t8 = negation flag (0=match inside, 1=match outside)
-    li   $t6, 0                 # $t6 = Found match inside set (0=No, 1=Yes)
+    li $t8, 0                 # negation flag (0=normal, 1=negated with ^)
+    li $t6, 0                 # did we find a match? (0=no, 1=yes)
     
-    lb   $t0, 0($s5)            # Load first char of content
-    li   $t9, '^'
-    beq  $t0, $t9, set_negation_flag # Check for negation '^'
+    # check if first character is ^ (negation)
+    lb $t0, 0($t3)            
+    li $t9, '^'
+    beq $t0, $t9, set_negation
 
-range_check_start:
-    # $t0 = current regex char. (Loaded using $s5)
-    lb   $t0, 0($s5)
-    li   $t9, ']'
-    beq  $t0, $t9, range_check_result # Found ']', finalize result
+range_check_loop:
+    lb $t0, 0($t3)
+    li $t9, ']'
+    beq $t0, $t9, range_done # found closing bracket
+    beq $t0, $zero, range_done # safety check for end of string
 
-    # Check for range separator '-' (X-Y)
-    lb   $t1, 1($s5)            # Lookahead for '-'
-    li   $t9, '-'
-    bne  $t1, $t9, range_literal_check_range # Not a range, check for single literal
+    # check if this is a range like a-z
+    lb $t1, 1($t3)            # look at next character
+    li $t9, '-'
+    bne $t1, $t9, check_single_char # not a range, just check single character
     
-    # --- Range: X-Y ---
-    lb   $t5, 0($s5)            # $t5 = Start of range (e.g., 'A')
-    lb   $t7, 2($s5)            # $t7 = End of range (e.g., 'Z')
+    # this is a range like a-z
+    lb $t5, 0($t3)            # start of range
+    lb $t7, 2($t3)            # end of range
     
-    # Check if sentence char ($s7) is between start and end (inclusive)
-    slt  $t9, $s7, $t5          # t9 = 1 if $s7 < $t5 (Fail low)
-    bne  $t9, $zero, range_next_token_3 # too low
+    # is our character in this range?
+    slt $t9, $s7, $t5          
+    bne $t9, $zero, skip_range # too low
     
-    slt  $t9, $t7, $s7          # t9 = 1 if $t7 < $s7 (Fail high)
-    bne  $t9, $zero, range_next_token_3 # too high
+    slt $t9, $t7, $s7          
+    bne $t9, $zero, skip_range # too high
     
-    # Match found within range (no need to check other items)
-    li   $t6, 1                 # Set match found flag
-    j    range_check_result      # Exit loop early
+    # it's in the range!
+    li $t6, 1                 
+    j range_done      
 
-range_literal_check_range:
-    # --- Literal: [abc] or [A] ---
-    beq  $t0, $s7, range_match_found # Match found
+check_single_char:
+    # just check if characters are equal
+    beq $t0, $s7, found_match 
     
-    addi $s5, $s5, 1           # Advance regex pointer
-    j    range_check_start     # Check next token/range
+    addi $t3, $t3, 1           # move to next character in range
+    j range_check_loop     
 
-range_next_token_3:
-    addi $s5, $s5, 3           # Skip X-Y range
-    j    range_check_start     # Check next token/range
+skip_range:
+    addi $t3, $t3, 3           # skip past a-z
+    j range_check_loop     
 
-set_negation_flag:
-    li   $t8, 1                 # Set negation flag
-    addi $s5, $s5, 1            # Skip '^'
-    j    range_check_start      # Continue to check actual content
+set_negation:
+    li $t8, 1                 # set negation flag
+    addi $t3, $t3, 1            # skip past ^
+    j range_check_loop      
 
-range_match_found:
-    li   $t6, 1                 # Set match found flag
-    j    range_check_result      # Exit loop early
+found_match:
+    li $t6, 1                 # we found a match
+    j range_done              # once we find a match, we're done
 
-range_check_result:
-    # $t8 = negation flag (0=no negation, 1=negation)
-    # $t6 = match status (1=inside set, 0=outside set)
-    
-    beq  $t8, $zero, check_non_negated_range # If not negated, proceed
+range_done:
+    # now decide if we matched based on negation
+    beq $t8, $zero, check_normal # not negated
 
-    # --- Negated Check (t8 == 1) ---
-    bne  $t6, $zero, stm_fail_return_range # Negated and inside set = FAIL
-    j    stm_success_return_range          # Negated and outside set = SUCCESS
+    # negated - we want the opposite of what we found
+    bne $t6, $zero, range_no_match # found match but negated = no match
+    j range_yes_match          # didn't find match but negated = yes match
 
-check_non_negated_range:
-    # --- Non-Negated Check (t8 == 0) ---
-    bne  $t6, $zero, stm_success_return_range # Inside set = SUCCESS
-    j    stm_fail_return_range                  # Outside set = FAIL
+check_normal:
+    # normal - we want exactly what we found
+    bne $t6, $zero, range_yes_match # found match = yes match
+    j range_no_match                  # didn't find match = no match
 
-stm_success_return_range:
-    # Restore saved registers
-    lw   $s5, 0($sp)            # Restore $s5
-    lw   $t2, 4($sp)            # Restore $t2
-    lw   $a0, 8($sp)            # Restore $a0
-    lw   $ra, 12($sp)
+range_yes_match:
+    # restore registers and return success
+    lw $s5, 0($sp)            
+    lw $t2, 4($sp)            
+    lw $a0, 8($sp)            
+    lw $ra, 12($sp)
     addi $sp, $sp, 16
-    j    stm_success_return
+    j yes_match
 
-stm_fail_return_range:
-    # Restore saved registers
-    lw   $s5, 0($sp)            # Restore $s5
-    lw   $t2, 4($sp)            # Restore $t2
-    lw   $a0, 8($sp)            # Restore $a0
-    lw   $ra, 12($sp)
+range_no_match:
+    # restore registers and return failure
+    lw $s5, 0($sp)            
+    lw $t2, 4($sp)            
+    lw $a0, 8($sp)            
+    lw $ra, 12($sp)
     addi $sp, $sp, 16
-    j    stm_fail_return
+    j no_match
 
-stm_success_return:
-    lw   $ra, 0($sp)
+yes_match:
+    lw $ra, 0($sp)
     addi $sp, $sp, 4
-    li   $v0, 1
-    jr   $ra
+    li $v0, 1
+    jr $ra
 
-stm_fail_return:
-    lw   $ra, 0($sp)
+no_match:
+    lw $ra, 0($sp)
     addi $sp, $sp, 4
-    li   $v0, 0
-    jr   $ra
+    li $v0, 0
+    jr $ra
 
-################################################################################
-# HELPER FUNCTIONS (I/O)
-################################################################################
+# Helper functions
 
-# clean_newline: Removes the trailing newline/CR character from a string read by syscall 8.
-# Argument: $a0 = string address
-# Return: String is modified in place.
+# clean_newline: removes the newline that syscall 8 adds to input
+# $a0 = string to clean
 clean_newline:
-    move $t1, $a0             # $t1 = Start address
+    move $t1, $a0             # start at beginning of string
 clean_loop:
-    lb   $t0, 0($t1)            
-    beq  $t0, $zero, clean_end 
+    lb $t0, 0($t1)            
+    beq $t0, $zero, clean_done 
     
-    li   $t2, 10              # Newline character (LF)
-    beq  $t0, $t2, replace_char
-    li   $t2, 13              # Carriage return character (CR)
-    beq  $t0, $t2, replace_char
+    # check for newline or carriage return
+    li $t2, 10              
+    beq $t0, $t2, remove_it
+    li $t2, 13              
+    beq $t0, $t2, remove_it
     
+    # not a newline, keep looking
     addi $t1, $t1, 1          
-    j    clean_loop
+    j clean_loop
     
-replace_char:
-    sb   $zero, 0($t1)        # Replace newline/CR with null terminator
+remove_it:
+    sb $zero, 0($t1)        # replace with null terminator
     
-clean_end:
-    jr   $ra                  # Return
+clean_done:
+    jr $ra
 
-# print_substring: Prints a substring of a given length.
-# Arguments: $a0 = start address, $a1 = length
-# Return: none
+# print_substring: prints part of a string
+# $a0 = where to start printing, $a1 = how many characters
 print_substring:
     addi $sp, $sp, -4
-    sw   $ra, 0($sp)
+    sw $ra, 0($sp)
 
-    move $s5, $a1             # $s5 = length (counter)
-    move $s6, $a0             # $s6 = current address
+    move $s5, $a1             # length to print
+    move $s6, $a0             # start address
     
-    # 1. Store the original character at the end of the substring
-    add  $t8, $s6, $s5        # $t8 = address of char *after* the substring
-    lb   $t7, 0($t8)          # $t7 = character to restore (could be null)
+    # save the character after our substring so we can restore it
+    add $t8, $s6, $s5        
+    lb $t7, 0($t8)          
     
-    # 2. Temporarily place a null terminator for print_string syscall
-    sb   $zero, 0($t8)
+    # put a null terminator there temporarily
+    sb $zero, 0($t8)
     
-    # 3. Print the substring
-    li   $v0, 4                 
+    # print the string
+    li $v0, 4                 
     move $a0, $s6             
     syscall
     
-    # 4. Restore the original character
-    sb   $t7, 0($t8)            
+    # put back the original character
+    sb $t7, 0($t8)            
     
-    lw   $ra, 0($sp)
+    lw $ra, 0($sp)
     addi $sp, $sp, 4
-    jr   $ra
+    jr $ra
     
 exit:
     li   $v0, 10
